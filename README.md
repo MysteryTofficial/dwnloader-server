@@ -129,9 +129,3 @@ Python packages installed inside virtual environment:
 ![UI Screenshot](https://user-images.githubusercontent.com/yourusername/dwnloader-screenshot.png)
 *Real-time download progress, video/audio formats, and subtitle support.*
 
----
-
-## License
-
-MIT License © 2025
-*You are free to modify and redistribute the script.*
