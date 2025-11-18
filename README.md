@@ -1,4 +1,4 @@
-# ⚡ Dwnloader
+# ⚡ Dwnloader Server
 
 **Blazingly Fast Multi-User Video & Audio Downloader**
 Optimized for Ubuntu servers with shared downloads view and real-time progress tracking.
