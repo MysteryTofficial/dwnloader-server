@@ -23,7 +23,7 @@ Optimized for Ubuntu servers with shared downloads view and real-time progress t
 Run the installer on Ubuntu Server:
 
 ```bash
-sudo bash install.sh
+curl -sSL https://raw.githubusercontent.com/MysteryTofficial/dwnloader-server/refs/heads/main/install.sh | sudo bash
 ```
 
 The script will:
