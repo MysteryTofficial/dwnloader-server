@@ -456,6 +456,48 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+echo "🕒 Setting up daily yt-dlp auto-update..."
+
+# Create update script
+cat > /usr/local/bin/update-ytdlp << 'EOFUPD'
+#!/bin/bash
+set -e
+curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+chmod a+rx /usr/local/bin/yt-dlp
+EOFUPD
+
+chmod +x /usr/local/bin/update-ytdlp
+
+# Systemd service
+cat > /etc/systemd/system/ytdlp-update.service << 'EOFSVC'
+[Unit]
+Description=Update yt-dlp to latest version
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/update-ytdlp
+EOFSVC
+
+# Systemd timer
+cat > /etc/systemd/system/ytdlp-update.timer << 'EOFTMR'
+[Unit]
+Description=Run yt-dlp update daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOFTMR
+
+# Enable + start timer
+systemctl daemon-reload
+systemctl enable --now ytdlp-update.timer
+
+echo "✅ Daily auto-update for yt-dlp is now active!"
+
+
 echo "🔄 Reloading systemd..."
 systemctl daemon-reload
 
