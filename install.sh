@@ -1,3 +1,45 @@
+if process.returncode == 0:
+    # Find output files
+    files = list(DOWNLOAD_DIR.glob(f"{get_url_hash(url)}_*.{output_format}"))
+    if files:
+        newest_file = max(files, key=lambda x: x.stat().st_mtime)
+
+        # Extract original title part
+        original_name = newest_file.stem.replace(get_url_hash(url) + "_", "")
+
+        # Sanitize it
+        clean_name = sanitize_filename(original_name)
+        clean_filename = f"{clean_name}.{output_format}"
+        clean_file_path = DOWNLOAD_DIR / clean_filename
+
+        # Rename physical file if necessary
+        if clean_file_path != newest_file:
+            try:
+                newest_file.rename(clean_file_path)
+                newest_file = clean_file_path
+            except Exception as rename_err:
+                # If renaming failed, fallback to original filename
+                clean_filename = newest_file.name
+                clean_file_path = newest_file
+
+        with downloads_lock:
+            downloads_db[download_id]["status"] = "complete"
+            downloads_db[download_id]["filename"] = clean_filename
+            downloads_db[download_id]["progress"] = 100
+            downloads_db[download_id]["size"] = newest_file.stat().st_size
+            downloads_db[download_id]["timestamp"] = datetime.now().isoformat()
+
+        socketio.emit("progress", {
+            "download_id": download_id,
+            "progress": 100,
+            "status": "complete",
+            "filename": clean_filename,
+            "size": newest_file.stat().st_size
+        })
+    else:
+        raise Exception("Downloaded file not found")
+
+
 #!/bin/bash
 
 # Dwnloader - Ubuntu Server Installation/Update Script
