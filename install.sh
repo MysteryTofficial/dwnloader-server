@@ -25,8 +25,7 @@ if process.returncode == 0:
                     'progress': 100,
                     'status': 'complete',
                     'filename': clean_filename,
-                    'size': newest_file.stat().st_size,
-                    'timestamp': datetime.now().isoformat()
+                    'size': newest_file.stat().st_size
                 })#!/bin/bash
 
 # Dwnloader - Ubuntu Server Installation/Update Script
