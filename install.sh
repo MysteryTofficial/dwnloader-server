@@ -1,10 +1,10 @@
 #!/bin/bash
-# Dwnloader - Ubuntu Server Installation/Update Script (v2.4 - Full User Management)
+# Dwnloader - Ubuntu Server Installation/Update Script (v2.3 - SECURE + BasicAuth)
 # Run with: sudo bash install.sh
 set -e
 
 echo "=================================================="
-echo "DWNLOADER v2.4 - Full User Management + Encrypted Auth"
+echo "DWNLOADER - Installation/Update Script (v2.3 - SECURE + HTTP Basic Auth)"
 echo "=================================================="
 
 if [ "$EUID" -ne 0 ]; then
@@ -17,365 +17,375 @@ SERVICE_NAME="dwnloader"
 UPDATING=false
 
 if [ -d "$INSTALL_DIR" ]; then
-    echo "Existing installation detected → UPDATE mode"
+    echo "Existing installation detected at $INSTALL_DIR"
+    echo "Running UPDATE mode..."
     UPDATING=true
-    systemctl stop $SERVICE_NAME 2>/dev/null || true
+    if systemctl is-active --quiet $SERVICE_NAME; then
+        echo "Stopping $SERVICE_NAME service..."
+        systemctl stop $SERVICE_NAME
+    fi
 else
-    echo "FRESH INSTALLATION mode"
+    echo "Running FRESH INSTALLATION mode..."
 fi
 
-# Install dependencies
+echo "Installing/Updating system dependencies..."
 apt-get update
-apt-get install -y python3 python3-pip python3-venv ffmpeg curl openssl
+apt-get install -y python3 python3-pip python3-venv ffmpeg curl
 
-# yt-dlp
+echo "Installing/Updating yt-dlp..."
 curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
 chmod a+rx /usr/local/bin/yt-dlp
 
-# Create system user
-if ! id -u dwnloader &>/dev/null; then
-    useradd -r -m -s /bin/bash dwnloader
+if [ "$UPDATING" = false ]; then
+    echo "Creating dwnloader user..."
+    if ! id -u dwnloader &>/dev/null; then
+        useradd -r -m -s /bin/bash dwnloader
+    fi
 fi
 
+echo "Setting up application directory..."
 mkdir -p $INSTALL_DIR
 cd $INSTALL_DIR
 
-# Python venv
-[ ! -d "venv" ] && python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
-pip install flask flask-socketio eventlet bcrypt pycryptodome
-
-# Encrypted files
-USERS_FILE="$INSTALL_DIR/users.json.enc"
-KEY_FILE="$INSTALL_DIR/.enc_key"
-MANAGE_SCRIPT="$INSTALL_DIR/manage_users.py"
-
-# First-time: create encryption key + admin user
-if [ ! -f "$KEY_FILE" ]; then
-    echo "FIRST-TIME SETUP: Creating master encryption key and admin user"
-    read -sp "Enter strong master encryption password (SAVE THIS!): " ENC_PASS
-    echo
-    if [ ${#ENC_PASS} -lt 8 ]; then
-        echo "Password too short!"
-        exit 1
-    fi
-    # Derive 32-byte key from password using PBKDF2
-    openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 -pass pass:"$ENC_PASS" -P -md sha256 2>/dev/null | grep "^key=" | cut -d= -f2 > "$KEY_FILE"
-    chmod 600 "$KEY_FILE"
-
-    read -p "Admin username [admin]: " ADMIN_USER
-    ADMIN_USER=${ADMIN_USER:-admin}
-    read -sp "Admin password: " ADMIN_PASS
-    echo
-    HASH=$(python3 -c "import bcrypt; print(bcrypt.hashpw('$ADMIN_PASS'.encode(), bcrypt.gensalt(12)).decode())")
-    echo "{\"$ADMIN_USER\": \"$HASH\"}" | openssl enc -aes-256-cbc -salt -pbkdf2 -pass file:"$KEY_FILE" -out "$USERS_FILE"
-    echo "Admin '$ADMIN_USER' created!"
-else
-    echo "Existing encrypted user database found."
+if [ "$UPDATING" = true ]; then
+    echo "Backing up old app.py..."
+    [ -f "app.py" ] && cp app.py app.py.backup.$(date +%Y%m%d_%H%M%S)
 fi
 
-# === USER MANAGEMENT SCRIPT ===
-cat > "$MANAGE_SCRIPT" << 'EOF'
-#!/usr/bin/env python3
-import json
-import bcrypt
-import os
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad, unpad
-from getpass import getpass
+echo "Setting up Python virtual environment..."
+[ ! -d "venv" ] && python3 -m venv venv
+source venv/bin/activate
 
-KEY_FILE = ".enc_key"
-USERS_FILE = "users.json.enc"
+echo "Installing/Updating Python dependencies..."
+pip install --upgrade pip
+pip install --upgrade flask flask-socketio python-socketio python-engineio eventlet Flask-HTTPAuth
 
-def load_key():
-    return open(KEY_FILE, "rb").read().strip()
+# Generate secure random password if not already set
+if ! grep -q "BASIC_AUTH" /etc/dwnloader/auth.conf 2>/dev/null || [ "$UPDATING" = false ]; then
+    NEW_USER="admin"
+    NEW_PASS=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 20)
+    BASIC_AUTH_PAIR="${NEW_USER}:${NEW_PASS}"
+else
+    BASIC_AUTH_PAIR=$(grep "BASIC_AUTH=" /etc/dwnloader/auth.conf | cut -d= -f2)
+    NEW_USER=$(echo $BASIC_AUTH_PAIR | cut -d: -f1)
+    NEW_PASS=$(echo $BASIC_AUTH_PAIR | cut -d: -f2)
+fi
 
-def decrypt_users():
-    if not os.path.exists(USERS_FILE):
-        return {}
-    data = open(USERS_FILE, "rb").read()
-    iv = data[:16]
-    cipher = AES.new(load_key(), AES.MODE_CBC, iv)
-    try:
-        pt = unpad(cipher.decrypt(data[16:]), 16)
-        return json.loads(pt.decode())
-    except:
-        print("Failed to decrypt. Wrong key?")
-        exit(1)
+echo "Creating secure credentials..."
+mkdir -p /etc/dwnloader
+echo "BASIC_AUTH=$BASIC_AUTH_PAIR" > /etc/dwnloader/auth.conf
 
-def encrypt_users(users):
-    raw = json.dumps(users).encode()
-    iv = os.urandom(16)
-    cipher = AES.new(load_key(), AES.MODE_CBC, iv)
-    ct = iv + cipher.encrypt(pad(raw, 16))
-    open(USERS_FILE, "wb").write(ct)
-
-def auth_admin():
-    print("Admin Authentication Required")
-    username = input("Username: ").strip()
-    password = getpass("Password: ")
-    users = decrypt_users()
-    stored = users.get(username)
-    if stored and bcrypt.checkpw(password.encode(), stored.encode()):
-        return username
-    print("Access denied.")
-    exit(1)
-
-def menu():
-    print("\nDwnloader User Management")
-    print("1. List users")
-    print("2. Add user")
-    print("3. Delete user")
-    print("4. Change password")
-    print("5. Exit")
-    return input("\nChoose: ").strip()
-
-if __name__ == "__main__":
-    if not os.path.exists(KEY_FILE):
-        print("Encryption key missing!")
-        exit(1)
-    admin = auth_admin()
-    print(f"\nLogged in as admin: {admin}")
-
-    while True:
-        choice = menu()
-        users = decrypt_users()
-
-        if choice == "1":
-            print("\nCurrent users:")
-            for u in users.keys():
-                print(f"  • {u}")
-            if not users:
-                print("  (none)")
-
-        elif choice == "2":
-            new_user = input("New username: ").strip()
-            if new_user in users:
-                print("User already exists!")
-                continue
-            pwd1 = getpass("Password: ")
-            pwd2 = getpass("Confirm: ")
-            if pwd1 != pwd2:
-                print("Passwords don't match!")
-                continue
-            hashpw = bcrypt.hashpw(pwd1.encode(), bcrypt.gensalt(12)).decode()
-            users[new_user] = hashpw
-            encrypt_users(users)
-            print(f"User '{new_user}' added!")
-
-        elif choice == "3":
-            username = input("Username to delete: ").strip()
-            if username not in users:
-                print("User not found!")
-                continue
-            if username == admin:
-                print("You cannot delete yourself!")
-                continue
-            del users[username]
-            encrypt_users(users)
-            print(f"User '{username}' deleted!")
-
-        elif choice == "4":
-            username = input("Username: ").strip()
-            if username not in users:
-                print("User not found!")
-                continue
-            pwd1 = getpass("New password: ")
-            pwd2 = getpass("Confirm: ")
-            if pwd1 != pwd2:
-                print("Passwords don't match!")
-                continue
-            users[username] = bcrypt.hashpw(pwd1.encode(), bcrypt.gensalt(12)).decode()
-            encrypt_users(users)
-            print(f"Password updated for '{username}'!")
-
-        elif choice == "5":
-            print("Goodbye!")
-            break
-        else:
-            print("Invalid option")
-EOF
-chmod +x "$MANAGE_SCRIPT"
-
-# === MAIN app.py WITH AUTH ===
+echo "Creating/Updating app.py (Audio/MP3 default + Auto-refresh + BASIC AUTH PROTECTED)"
 cat > app.py << 'EOF'
-from flask import Flask, request, jsonify, send_file, session, redirect, url_for, render_template_string
+"""
+Dwnloader - Blazingly Fast Multi-User Video/Audio Downloader
+SECURED WITH HTTP BASIC AUTHENTICATION
+Audio/MP3 default + Auto-refresh every 5 seconds
+"""
+from flask import Flask, request, jsonify, send_file, Response
 from flask_socketio import SocketIO
-import os, subprocess, uuid, threading, time, re, unicodedata, hashlib, json, bcrypt
+from flask_httpauth import HTTPBasicAuth
+import os
+import subprocess
+import uuid
+import threading
+import time
+import re
+import unicodedata
 from pathlib import Path
 from datetime import datetime
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad, unpad
+import hashlib
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.urandom(32)
-app.config['PERMANENT_SESSION_LIFETIME'] = 604800  # 7 days
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', str(uuid.uuid4()))
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 
-DOWNLOAD_DIR = Path("downloads")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', ping_timeout=60, ping_interval=25)
+auth = HTTPBasicAuth()
+
+# Load credentials from environment (set via systemd EnvironmentFile)
+users = {}
+if os.getenv("BASIC_AUTH"):
+    for pair in os.getenv("BASIC_AUTH").split(","):
+        if ":" in pair:
+            u, p = pair.split(":", 1)
+            users[u.strip()] = p.strip()
+
+@auth.verify_password
+def verify_password(username, password):
+    if username in users and users.get(username) == password:
+        return username
+    return None
+
+DOWNLOAD_DIR = Path(os.getenv('DOWNLOAD_DIR', 'downloads'))
+YTDLP_EXEC = os.getenv('YTDLP_PATH', 'yt-dlp')
+MAX_CONCURRENT = int(os.getenv('MAX_CONCURRENT', '3'))
+CLEANUP_HOURS = int(os.getenv('CLEANUP_HOURS', '24'))
 DOWNLOAD_DIR.mkdir(exist_ok=True)
-USERS_FILE = Path("users.json.enc")
-KEY_FILE = Path(".enc_key")
+
 downloads_db = {}
 downloads_lock = threading.Lock()
 
-def load_key():
-    return KEY_FILE.read_bytes().strip()
-
-def decrypt_users():
-    if not USERS_FILE.exists(): return {}
-    data = USERS_FILE.read_bytes()
-    iv, ct = data[:16], data[16:]
-    cipher = AES.new(load_key(), AES.MODE_CBC, iv)
+def check_ytdlp():
     try:
-        pt = unpad(cipher.decrypt(ct), 16)
-        return json.loads(pt.decode())
-    except: return {}
+        subprocess.run([YTDLP_EXEC, "--version"], capture_output=True, timeout=5, check=True)
+        return True
+    except:
+        return False
 
-USERS = decrypt_users()
+def get_url_hash(url):
+    return hashlib.md5(url.encode()).hexdigest()[:12]
 
-def require_auth(f):
-    def wrapper(*args, **kwargs):
-        if not session.get('logged_in'):
-            return redirect('/login')
-        return f(*args, **kwargs)
-    wrapper.__name__ = f.__name__
-    return wrapper
+def sanitize_filename(filename):
+    name_without_ext = filename.rsplit('.', 1)[0] if '.' in filename else filename
+    normalized = unicodedata.normalize('NFKD', name_without_ext)
+    sanitized = ''.join(c for c in normalized if c.isascii() and (c.isalnum() or c in ' -*'))
+    sanitized = ' '.join(sanitized.split())
+    sanitized = sanitized.strip(' -*')
+    return sanitized if sanitized else 'download'
 
-# === LOGIN PAGE ===
-LOGIN_HTML = '''<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Dwnloader Login</title>
-<style>
-body{background:#0a0a0a;color:#e0e0e0;font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
-.box{background:#1a1a1a;padding:40px;border-radius:16px;max-width:380px;width:100%;box-shadow:0 10px 30px rgba(0,0,0,.5);border:1px solid #333}
-h1{text-align:center;background:linear-gradient(135deg,#60a5fa,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:20px}
-input,button{width:100%;padding:14px;margin:10px 0;border-radius:8px;border:1px solid #333;background:#0a0a0a;color:#e0e0e0;font-size:1rem}
-button{background:linear-gradient(135deg,#60a5fa,#a78bfa);border:none;color:white;font-weight:600;cursor:pointer}
-.error{color:#f87171;text-align:center;margin:10px 0}
-</style></head><body>
-<div class="box">
-<h1>Dwnloader</h1>
-<p style="text-align:center;color:#888">Secure Login Required</p>
-{% if error %}<div class="error">{{ error }}</div>{% endif %}
-<form method=post>
-<input type=text name=username placeholder="Username" required autofocus>
-<input type=password name=password placeholder="Password" required>
-<button type=submit>Login</button>
-</form>
-</div></body></html>'''
+def download_worker(download_id, url, quality, subtitle_lang, output_format):
+    try:
+        with downloads_lock:
+            downloads_db[download_id]['status'] = 'downloading'
+        socketio.emit('progress', {'download_id': download_id, 'progress': 0, 'status': 'downloading'})
 
-@app.route('/login', methods=['GET','POST'])
-def login():
-    if request.method == 'POST':
-        user = request.form.get('username')
-        pwd = request.form.get('password')
-        stored = USERS.get(user)
-        if stored and bcrypt.checkpw(pwd.encode(), stored.encode()):
-            session['logged_in'] = True
-            session['username'] = user
-            return redirect('/')
-        return render_template_string(LOGIN_HTML, error="Invalid credentials")
-    return render_template_string(LOGIN_HTML, error=None)
+        cmd = [YTDLP_EXEC, '--no-playlist', '--no-warnings', '--progress', '--newline']
+        if quality == "MUSIC":
+            cmd.extend(['-x', '--audio-format', output_format, '--audio-quality', '0', '--embed-thumbnail', '--add-metadata'])
+            output_template = str(DOWNLOAD_DIR / f"{get_url_hash(url)}*%(title).60s.{output_format}")
+        else:
+            if quality != "none":
+                height = quality.replace("p", "")
+                cmd.extend([ '-f', f'bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height}]' ])
+            else:
+                cmd.extend(['-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best'])
+            if subtitle_lang != "none":
+                cmd.extend(['--write-subs', '--sub-langs', subtitle_lang, '--embed-subs'])
+            cmd.extend(['--merge-output-format', output_format])
+            output_template = str(DOWNLOAD_DIR / f"{get_url_hash(url)}*%(title).60s.{output_format}")
 
-@app.route('/logout')
-def logout():
-    session.clear()
-    return redirect('/login')
+        cmd.extend(['-o', output_template, url])
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        last_progress = 0
+        for line in process.stdout:
+            if '[download]' in line and '%' in line:
+                match = re.search(r'(\d+(?:.\d+)?)%', line)
+                if match:
+                    progress = int(float(match.group(1)))
+                    if progress - last_progress >= 5 or progress == 100:
+                        last_progress = progress
+                        with downloads_lock:
+                            downloads_db[download_id]['progress'] = progress
+                        socketio.emit('progress', {'download_id': download_id, 'progress': progress, 'status': 'downloading'})
+            elif any(x in line for x in ['[ffmpeg]', 'Merging', 'Converting']):
+                with downloads_lock:
+                    downloads_db[download_id]['status'] = 'converting'
+                socketio.emit('progress', {'download_id': download_id, 'progress': 95, 'status': 'converting'})
 
-# === MAIN UI (your original HTML with logout & username) ===
-INDEX_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dwnloader</title>
-<script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0a0a;color:#e0e0e0;min-height:100vh;padding:20px}
-.container{max-width:1200px;margin:0 auto}
-.header{text-align:center;margin-bottom:40px;padding:20px;background:linear-gradient(135deg,#1a1a1a,#2a2a2a);border-radius:12px;border:1px solid #333}
-h1{font-size:2rem;margin-bottom:8px;background:linear-gradient(135deg,#60a5fa,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.header small{display:block;margin-top:10px;font-size:0.9rem;color:#888}
-.header a{color:#60a5fa;text-decoration:underline}
-.input-section{background:#1a1a1a;padding:24px;border-radius:12px;margin-bottom:24px;border:1px solid #333}
-/* ... rest of your beautiful CSS ... */
-</style>
-</head>
-<body>
-<div class="container">
-<div class="header">
-<h1>Dwnloader</h1>
-<p>Blazingly fast downloader</p>
-<small>Logged in as <strong>{{ username }}</strong> • <a href="/logout">Logout</a></small>
-</div>
-<!-- Your full original input section + downloads list here -->
-<!-- (Paste everything from your original script) -->
-</div>
-</body></html>"""
+        process.wait()
+        if process.returncode == 0:
+            files = list(DOWNLOAD_DIR.glob(f"{get_url_hash(url)}_*.{output_format}"))
+            if not files:
+                raise Exception("Downloaded file not found")
+            final_file = max(files, key=lambda x: x.stat().st_mtime)
+            dirty_title = final_file.stem[len(get_url_hash(url)) + 1 :]
+            clean_title = sanitize_filename(dirty_title)
+            if not clean_title:
+                clean_title = "download"
+            new_filename = f"{clean_title}.{output_format}"
+            new_path = DOWNLOAD_DIR / new_filename
+            if new_path.exists():
+                new_path = final_file
+                new_filename = final_file.name
+            else:
+                if new_path != final_file:
+                    final_file.rename(new_path)
+            file_size = new_path.stat().st_size
+            with downloads_lock:
+                downloads_db[download_id].update({
+                    'status': 'complete',
+                    'filename': new_filename,
+                    'progress': 100,
+                    'size': file_size,
+                    'timestamp': datetime.now().isoformat()
+                })
+            socketio.emit('progress', {
+                'download_id': download_id,
+                'progress': 100,
+                'status': 'complete',
+                'filename': new_filename,
+                'size': file_size
+            })
+        else:
+            raise Exception(f"yt-dlp exited with code {process.returncode}")
+    except Exception as e:
+        with downloads_lock:
+            downloads_db[download_id]['status'] = 'error'
+            downloads_db[download_id]['error'] = str(e)
+        socketio.emit('progress', {
+            'download_id': download_id,
+            'progress': 0,
+            'status': 'error',
+            'error': str(e)
+        })
 
-# Paste your FULL original frontend HTML inside INDEX_HTML (too long to repeat here)
+def cleanup_worker():
+    while True:
+        try:
+            cutoff = time.time() - (CLEANUP_HOURS * 3600)
+            deleted = 0
+            for file_path in DOWNLOAD_DIR.glob('*'):
+                if file_path.is_file() and file_path.stat().st_mtime < cutoff:
+                    file_path.unlink()
+                    deleted += 1
+            if deleted > 0:
+                print(f"[CLEANUP] Removed {deleted} old files")
+            with downloads_lock:
+                to_remove = [dl_id for dl_id, info in downloads_db.items()
+                            if info.get('status') == 'complete' and
+                            datetime.fromisoformat(info['timestamp']).timestamp() < cutoff]
+                for dl_id in to_remove:
+                    del downloads_db[dl_id]
+        except Exception as e:
+            print(f"[CLEANUP ERROR] {e}")
+        time.sleep(1800)
 
-# === All your original functions: download_worker, cleanup_worker, etc. ===
-# (unchanged — just copy from your v2.2 script)
+threading.Thread(target=cleanup_worker, daemon=True).start()
 
-# === Protected routes ===
 @app.route('/')
-@require_auth
+@auth.login_required
 def index():
-    return render_template_string(INDEX_HTML, username=session['username'])
+    return '''<!DOCTYPE html>
+<html lang="en"> <head> <meta charset="UTF-8"> <meta name="viewport" content="width=device-width, initial-scale=1.0"> <title>Dwnloader</title> <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script> <style> *{margin:0;padding:0;box-sizing:border-box} body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0a0a;color:#e0e0e0;min-height:100vh;padding:20px} .container{max-width:1200px;margin:0 auto} .header{text-align:center;margin-bottom:40px;padding:20px;background:linear-gradient(135deg,#1a1a1a,#2a2a2a);border-radius:12px;border:1px solid #333} h1{font-size:2rem;margin-bottom:8px;background:linear-gradient(135deg,#60a5fa,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent} p{color:#888;font-size:.9rem} .input-section{background:#1a1a1a;padding:24px;border-radius:12px;margin-bottom:24px;border:1px solid #333} .input-group{display:flex;gap:12px;margin-bottom:16px} input,select{background:#0a0a0a;border:1px solid #333;color:#e0e0e0;padding:12px;border-radius:8px;font-size:.95rem;transition:all .2s;flex:1} input:focus,select:focus{outline:none;border-color:#60a5fa;box-shadow:0 0 0 2px rgba(96,165,250,.1)} .options{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px} button{padding:12px 24px;border:none;border-radius:8px;font-weight:600;cursor:pointer;transition:all .2s} .btn-primary{background:linear-gradient(135deg,#60a5fa,#a78bfa);color:white;width:100%} .btn-primary:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(96,165,250,.4)} .btn-primary:disabled{opacity:.5;cursor:not-allowed;transform:none} .downloads{background:#1a1a1a;border-radius:12px;padding:24px;border:1px solid #333} h2{margin-bottom:20px;font-size:1.3rem} .download-card{background:#0a0a0a;border:1px solid #333;border-radius:8px;padding:16px;margin-bottom:12px;transition:all .2s} .download-card:hover{border-color:#444;transform:translateX(4px)} .download-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:12px} .download-url{flex:1;color:#888;font-size:.85rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap} .status{padding:4px 12px;border-radius:12px;font-size:.75rem;font-weight:600} .status-downloading{background:#1e3a8a;color:#60a5fa} .status-converting{background:#581c87;color:#a78bfa} .status-complete{background:#065f46;color:#34d399} .status-error{background:#7f1d1d;color:#f87171} .progress-bar{height:4px;background:#2a2a2a;border-radius:2px;overflow:hidden;margin-bottom:12px} .progress-fill{height:100%;background:linear-gradient(90deg,#60a5fa,#a78bfa);transition:width .3s} .download-info{display:flex;justify-content:space-between;font-size:.8rem;color:#666;margin-bottom:8px;gap:16px} .btn-download{background:#065f46;color:#34d399;width:100%;margin-top:8px} .btn-download:hover{background:#047857} .empty{text-align:center;padding:60px 20px;color:#666} .alert{padding:12px;border-radius:8px;margin-bottom:16px;font-size:.9rem} .alert-error{background:#7f1d1d;color:#f87171} .alert-info{background:#1e3a8a;color:#60a5fa} @media(max-width:768px){.input-group{flex-direction:column}.options{grid-template-columns:1fr}.download-header{flex-direction:column;align-items:flex-start}} </style> </head> <body> <div class="container"> <div class="header"> <h1>Dwnloader</h1> <p>Blazingly fast video & audio downloader — Protected</p> </div> <div class="input-section"> <div id="alert"></div> <div class="input-group"> <input type="text" id="url" placeholder="Paste video or music URL..."> <button class="btn-secondary" onclick="paste()">Paste</button> </div> <div class="options"> <select id="quality" onchange="updateFormats()"> <option value="MUSIC" selected>Audio</option> <option value="720p">720p</option> <option value="1080p">1080p</option> <option value="1440p">1440p</option> <option value="2160p">4K</option> <option value="none">Best Video</option> </select> <select id="format"></select> <select id="subtitle"> <option value="none">No Subs</option> <option value="en">English</option> <option value="es">Spanish</option> <option value="fr">French</option> <option value="de">German</option> </select> </div> <button class="btn-primary" id="dlBtn" onclick="startDownload()">Download</button> </div> <div class="downloads"> <h2>All Downloads</h2> <div id="list"></div> </div> </div> <script> const socket = io(); const downloads = {}; const VIDEO_FORMATS = ['mp4','mkv','webm','avi']; const AUDIO_FORMATS = ['mp3','m4a','flac','wav','opus']; socket.on('progress', d => { downloads[d.download_id] = {...downloads[d.download_id], ...d}; render(); }); function formatBytes(b) { if (!b) return '0 B'; const k = 1024, s = ['B','KB','MB','GB'], i = Math.floor(Math.log(b)/Math.log(k)); return Math.round((b/Math.pow(k,i))*100)/100 + ' ' + s[i]; } function formatTime(t) { return t ? new Date(t).toLocaleString() : ''; } async function paste() { try { document.getElementById('url').value = await navigator.clipboard.readText(); } catch(e) { alert('Paste manually'); } } function updateFormats() { const q = document.getElementById('quality').value; const f = document.getElementById('format'); const formats = q === 'MUSIC' ? AUDIO_FORMATS : VIDEO_FORMATS; f.innerHTML = ''; formats.forEach(fmt => { const opt = document.createElement('option'); opt.value = fmt; opt.textContent = fmt.toUpperCase(); if ((q === 'MUSIC' && fmt === 'mp3') || (q !== 'MUSIC' && fmt === 'mp4')) opt.selected = true; f.appendChild(opt); }); } async function startDownload() { const url = document.getElementById('url').value.trim(); if (!url) return showAlert('Enter a URL', 'error'); const btn = document.getElementById('dlBtn'); btn.disabled = true; btn.textContent = 'Starting...'; try { const res = await fetch('/api/download', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ url, quality: document.getElementById('quality').value, format: document.getElementById('format').value, subtitle_lang: document.getElementById('subtitle').value }) }); const data = await res.json(); if (res.ok) { downloads[data.download_id] = {id: data.download_id, url, status: 'starting', progress: 0, timestamp: new Date().toISOString()}; render(); showAlert('Download started!', 'info'); document.getElementById('url').value = ''; } else { showAlert(data.error || 'Failed', 'error'); } } catch(e) { showAlert('Network error', 'error'); } finally { btn.disabled = false; btn.textContent = 'Download'; } } function showAlert(m, t) { const a = document.getElementById('alert'); a.innerHTML = `<div class="alert alert-${t}">${m}</div>`; setTimeout(() => a.innerHTML = '', 4000); } function render() { const list = document.getElementById('list'); const items = Object.values(downloads).sort((a,b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0)); if (!items.length) { list.innerHTML = '<div class="empty">No downloads yet</div>'; return; } list.innerHTML = items.map(d => ` <div class="download-card"> <div class="download-header"> <div class="download-url" title="${d.filename || d.url}">${d.filename || d.url}</div> <div class="status status-${d.status}">${d.status.toUpperCase()}</div> </div> <div class="progress-bar"><div class="progress-fill" style="width:${d.progress || 0}%"></div></div> <div class="download-info"><span>${d.progress || 0}% - ${formatBytes(d.size || 0)}</span></div> ${d.timestamp ? `<div style="font-size:.75rem;color:#555;margin-top:4px">Date: ${formatTime(d.timestamp)}</div>` : ''} ${d.status === 'complete' ? `<button class="btn-download" onclick="window.location.href='/api/download/${d.id}'">Download File</button>` : ''} </div> `).join(''); } socket.on('connect', () => { fetch('/api/downloads').then(r => r.json()).then(d => { Object.assign(downloads, d); render(); }); }); setInterval(() => { fetch('/api/downloads').then(r => r.json()).then(data => { Object.assign(downloads, data); render(); }); }, 5000); window.onload = () => { updateFormats(); }; </script> </body> </html>'''
+
+@app.route('/api/check')
+@auth.login_required
+def check_system():
+    return jsonify({
+        'ytdlp_installed': check_ytdlp(),
+        'downloads': len(downloads_db),
+        'active': len([d for d in downloads_db.values() if d['status'] in ['downloading','converting']])
+    })
 
 @app.route('/api/download', methods=['POST'])
-@require_auth
-def start_download(): ...
+@auth.login_required
+def start_download():
+    data = request.json
+    url = data.get('url','').strip()
+    quality = data.get('quality', 'MUSIC')
+    subtitle_lang = data.get('subtitle_lang', 'none')
+    output_format = data.get('format', 'mp3')
+    if not url: return jsonify({'error': 'URL required'}), 400
+    if not check_ytdlp(): return jsonify({'error': 'yt-dlp not installed'}), 500
+    active = len([d for d in downloads_db.values() if d['status'] in ['downloading','converting']])
+    if active >= MAX_CONCURRENT: return jsonify({'error': f'Max {MAX_CONCURRENT} concurrent downloads'}), 429
+    download_id = str(uuid.uuid4())
+    with downloads_lock:
+        downloads_db[download_id] = {
+            'id': download_id, 'url': url, 'quality': quality,
+            'format': output_format, 'status': 'starting', 'progress': 0,
+            'timestamp': datetime.now().isoformat()
+        }
+    threading.Thread(target=download_worker, args=(download_id, url, quality, subtitle_lang, output_format), daemon=True).start()
+    return jsonify({'download_id': download_id})
+
+@app.route('/api/download/<download_id>')
+@auth.login_required
+def get_file(download_id):
+    with downloads_lock:
+        info = downloads_db.get(download_id)
+        if not info or info['status'] != 'complete':
+            return jsonify({'error': 'Not ready'}), 404
+        file_path = DOWNLOAD_DIR / info['filename']
+        if not file_path.exists():
+            return jsonify({'error': 'File missing'}), 404
+        return send_file(file_path, as_attachment=True, download_name=info['filename'])
 
 @app.route('/api/downloads')
-@require_auth
-def list_downloads(): ...
-
-# ... rest of your original API routes ...
+@auth.login_required
+def list_downloads():
+    with downloads_lock:
+        return jsonify(downloads_db)
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000)
+    print("="*60)
+    print("DWNLOADER - PROTECTED WITH HTTP BASIC AUTH")
+    print("Login with username: admin")
+    print("Password is saved in /etc/dwnloader/auth.conf")
+    print("="*60)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
 EOF
 
-# === INSERT YOUR FULL ORIGINAL FRONTEND INTO INDEX_HTML ===
-# (Same trick as before — omitted for brevity but works)
-
+mkdir -p downloads
 chown -R dwnloader:dwnloader $INSTALL_DIR
-chmod 600 "$KEY_FILE"
 
-# Systemd service
-cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
+# Update systemd service to load credentials
+if [ "$UPDATING" = false ]; then
+    cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
 [Unit]
-Description=Dwnloader (Password Protected + User Management)
+Description=Dwnloader - Video/Audio Downloader Service (Protected)
 After=network.target
+
 [Service]
 Type=simple
 User=dwnloader
+Group=dwnloader
 WorkingDirectory=$INSTALL_DIR
+EnvironmentFile=/etc/dwnloader/auth.conf
 Environment="PATH=$INSTALL_DIR/venv/bin:/usr/local/bin:/usr/bin"
-ExecStart=$INSTALL_DIR/venv/bin/python $INSTALL_DIR/app.py
+Environment="DOWNLOAD_DIR=$INSTALL_DIR/downloads"
+Environment="MAX_CONCURRENT=3"
+Environment="CLEANUP_HOURS=24"
+ExecStart=$INSTALL_DIR/venv/bin/python app.py
 Restart=always
 RestartSec=10
+
 [Install]
 WantedBy=multi-user.target
 EOF
+fi
+
+# Daily yt-dlp update
+cat > /usr/local/bin/update-ytdlp.sh << 'EOFUPDATE'
+#!/bin/bash
+echo "[$(date +'%Y-%m-%d %H:%M:%S')] Updating yt-dlp..."
+curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+chmod a+rx /usr/local/bin/yt-dlp
+echo "[$(date +'%Y-%m-%d %H:%M:%S')] yt-dlp updated"
+EOFUPDATE
+chmod a+rx /usr/local/bin/update-ytdlp.sh
+
+cat > /etc/cron.daily/update-ytdlp << 'EOFCRON'
+#!/bin/bash
+/usr/local/bin/update-ytdlp.sh >> /var/log/ytdlp-update.log 2>&1
+EOFCRON
+chmod a+rx /etc/cron.daily/update-ytdlp
 
 systemctl daemon-reload
-systemctl enable --now $SERVICE_NAME
+[ "$UPDATING" = false ] && systemctl enable $SERVICE_NAME
+systemctl restart $SERVICE_NAME
+
+sleep 3
 
 echo ""
 echo "=================================================="
-echo "Dwnloader v2.4 INSTALLED SUCCESSFULLY!"
+if [ "$UPDATING" = true ]; then
+    echo "UPDATE + SECURITY UPGRADE Complete!"
+else
+    echo "SECURE INSTALLATION Complete!"
+    echo ""
+    echo "YOUR LOGIN CREDENTIALS (SAVE THEM NOW!)"
+    echo "Username: admin"
+    echo "Password: $NEW_PASS"
+    echo ""
+    echo "You can change them later with:"
+    echo "sudo systemctl edit dwnloader.service"
+    echo "Then add under [Service]:"
+    echo "Environment=BASIC_AUTH=admin:YourNewPassword"
+    echo "Then: sudo systemctl restart dwnloader"
+fi
 echo "=================================================="
-echo "Web: http://$(hostname -I | awk '{print $1}'):5000"
-echo ""
-echo "USER MANAGEMENT (run as any user):"
-echo "   python3 $MANAGE_SCRIPT"
-echo "   or: cd $INSTALL_DIR && ./manage_users.py"
-echo ""
-echo "Your master encryption key is CRITICAL. Back up:"
-echo "   $KEY_FILE"
+echo "Access: http://$(hostname -I | awk '{print $1}'):5000"
+echo "Status: systemctl status $SERVICE_NAME"
 echo "=================================================="
