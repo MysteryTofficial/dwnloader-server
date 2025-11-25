@@ -1,322 +1,311 @@
 #!/bin/bash
-# ╔══════════════════════════════════════════════════════════╗
-# ║           DWNLOADER — Final Perfect Edition v4.0         ║
-# ║   Real-time progress • MP3 default • Clean titles        ║
-# ╚══════════════════════════════════════════════════════════╝
-
+# Dwnloader - Ubuntu Server Installation/Update Script (FIXED + CLEAN FILENAMES)
+# Run with: sudo bash install.sh
 set -e
-
-R='\033[1;31m' G='\033[1;32m' B='\033[1;34m' Y='\033[1;33m' C='\033[1;36m' P='\033[1;35m' W='\033[1;37m' NC='\033[0m'
-OK="$G✓$NC" FAIL="$R✗$NC" WAIT="$Y◷$NC" FIRE="$P⚡$NC" ROCKET="$C🚀$NC" SPARK="$P✨$NC" MUSIC="$P🎵$NC"
-
-clear
-echo -e "${P} ______            _        _        _______  _______  ______   _______  _______ "
-echo -e "${P}(  __  \ |\     /|( (    /|( \      (  ___  )(  ___  )(  __  \ (  ____ \(  ____ )"
-echo -e "${P}| (  \  )| )   ( ||  \  ( || (      | (   ) || (   ) || (  \  )| (    \/| (    )|"
-echo -e "${P}| |   ) || | _ | ||   \ | || |      | |   | || (___) || |   ) || (__    | (____)|"
-echo -e "${P}| |   | || |( )| || (\ \) || |      | |   | ||  ___  || |   | ||  __)   |     __)"
-echo -e "${P}| |   ) || || || || | \   || |      | |   | || (   ) || |   ) || (      | (\ (   "
-echo -e "${P}| (__/  )| () () || )  \  || (____/\| (___) || )   ( || (__/  )| (____/\| ) \ \__"
-echo -e "${P}(______/ (_______)|/    )_)(_______/(_______)|/     \|(______/ (_______/|/   \__/${C}v4.0$NC"
-echo -e "${W}        Real-time progress • MP3 by default • Clean titles$NC"
-echo ""
-
+echo "=================================================="
+echo "DWNLOADER - Installation/Update Script (v2.1 - Clean Filenames Fixed)"
+echo "=================================================="
+# Check if running as root
 if [ "$EUID" -ne 0 ]; then
-    echo -e "$FAIL ${R}Run with sudo! →${W} sudo bash $0${NC}"; exit 1
+    echo "Please run as root (use sudo)"
+    exit 1
 fi
-
 INSTALL_DIR="/opt/dwnloader"
-SERVICE="dwnloader"
+SERVICE_NAME="dwnloader"
 UPDATING=false
-
-echo -e "$WAIT ${Y}Checking installation...$NC"
-sleep 1
+# Check if already installed
 if [ -d "$INSTALL_DIR" ]; then
+    echo "Existing installation detected at $INSTALL_DIR"
+    echo "Running UPDATE mode..."
     UPDATING=true
-    echo -e "$OK ${G}Update mode — your downloads are safe!$NC"
-    systemctl stop $SERVICE 2>/dev/null || true
+   
+    if systemctl is-active --quiet $SERVICE_NAME; then
+        echo "Stopping $SERVICE_NAME service..."
+        systemctl stop $SERVICE_NAME
+    fi
 else
-    echo -e "$OK ${C}Fresh install — let's go!$NC"
+    echo "Running FRESH INSTALLATION mode..."
 fi
-
-echo -e "\n$WAIT ${B}Installing dependencies...$NC"
-apt-get update -qq > /dev/null
-apt-get install -y python3 python3-pip python3-venv ffmpeg curl > /dev/null 2>&1
-echo -e "$OK ${G}Dependencies ready$NC"
-
-echo -e "$WAIT ${B}Updating yt-dlp...$NC"
-curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp --silent
+echo "Installing/Updating system dependencies..."
+apt-get update
+apt-get install -y python3 python3-pip python3-venv ffmpeg curl
+echo "Installing/Updating yt-dlp..."
+curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
 chmod a+rx /usr/local/bin/yt-dlp
-echo -e "$OK ${G}yt-dlp updated$NC"
-
-mkdir -p $INSTALL_DIR/downloads
-useradd -r -m -s /bin/bash dwnloader 2>/dev/null || true
-chown -R dwnloader:dwnloader $INSTALL_DIR 2>/dev/null || true
-cd $INSTALL_DIR
-
-if [ "$UPDATING" = true ]; then
-    [ -f app.py ] && cp app.py app.py.backup.$(date +%Y%m%d_%H%M%S)
+if [ "$UPDATING" = false ]; then
+    echo "Creating dwnloader user..."
+    if ! id -u dwnloader &>/dev/null; then
+        useradd -r -m -s /bin/bash dwnloader
+    fi
 fi
-
-[ ! -d venv ] && python3 -m venv venv > /dev/null 2>&1
+echo "Setting up application directory..."
+mkdir -p $INSTALL_DIR
+cd $INSTALL_DIR
+if [ "$UPDATING" = true ]; then
+    echo "Backing up old app.py..."
+    [ -f "app.py" ] && cp app.py app.py.backup.$(date +%Y%m%d_%H%M%S)
+fi
+echo "Setting up Python virtual environment..."
+[ ! -d "venv" ] && python3 -m venv venv
 source venv/bin/activate
-pip install --quiet --upgrade pip flask flask-socketio eventlet > /dev/null 2>&1
-
-echo -e "$WAIT ${P}Deploying Dwnloader v4.0 — Real-time + MP3 default...$NC"
+echo "Installing/Updating Python dependencies..."
+pip install --upgrade pip
+pip install --upgrade flask flask-socketio python-socketio python-engineio eventlet
+echo "Creating/Updating app.py (with CLEAN filenames!)"
 cat > app.py << 'EOF'
+"""
+Dwnloader - Blazingly Fast Multi-User Video/Audio Downloader
+NOW WITH PERFECTLY CLEAN FILENAMES + AUDIO/MP3 DEFAULT
+"""
 from flask import Flask, request, jsonify, send_file
 from flask_socketio import SocketIO
-import os, subprocess, uuid, threading, time, re, unicodedata, hashlib
+import os
+import subprocess
+import uuid
+import threading
+import time
+import re
+import unicodedata
 from pathlib import Path
 from datetime import datetime
-
+import hashlib
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', str(uuid.uuid4()))
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet', ping_timeout=60, ping_interval=25)
-
-DOWNLOAD_DIR = Path("downloads")
-YTDLP = "yt-dlp"
-MAX_CONCURRENT = 4
-db, lock = {}, threading.Lock()
-
-def hsh(url): return hashlib.md5(url.encode()).hexdigest()[:12]
-def clean(name):
-    n = name.rsplit('.', 1)[0] if '.' in name else name
-    n = unicodedata.normalize('NFKD', n)
-    n = ''.join(c for c in n if c.isascii() and (c.isalnum() or c in ' -_'))
-    n = ' '.join(n.split()).strip(' -_')
-    return n or 'download'
-
-def worker(did, url, quality, subs, fmt):
+DOWNLOAD_DIR = Path(os.getenv('DOWNLOAD_DIR', 'downloads'))
+YTDLP_EXEC = os.getenv('YTDLP_PATH', 'yt-dlp')
+MAX_CONCURRENT = int(os.getenv('MAX_CONCURRENT', '3'))
+CLEANUP_HOURS = int(os.getenv('CLEANUP_HOURS', '24'))
+DOWNLOAD_DIR.mkdir(exist_ok=True)
+downloads_db = {}
+downloads_lock = threading.Lock()
+def check_ytdlp():
     try:
-        with lock: db[did]['status'] = 'downloading'; db[did]['progress'] = 0
-        socketio.emit('progress', {'download_id': did, 'progress': 0, 'status': 'downloading'})
-
-        cmd = [YTDLP, '--no-playlist', '--no-warnings', '--newline']
-        template = str(DOWNLOAD_DIR / f"{hsh(url)}_%(title).60s.%(ext)s")
-
+        subprocess.run([YTDLP_EXEC, "--version"], capture_output=True, timeout=5, check=True)
+        return True
+    except:
+        return False
+def get_url_hash(url):
+    return hashlib.md5(url.encode()).hexdigest()[:12]
+def sanitize_filename(filename):
+    name_without_ext = filename.rsplit('.', 1)[0] if '.' in filename else filename
+    normalized = unicodedata.normalize('NFKD', name_without_ext)
+    sanitized = ''.join(c for c in normalized if c.isascii() and (c.isalnum() or c in ' -_'))
+    sanitized = ' '.join(sanitized.split())
+    sanitized = sanitized.strip(' -_')
+    return sanitized if sanitized else 'download'
+def download_worker(download_id, url, quality, subtitle_lang, output_format):
+    try:
+        with downloads_lock:
+            downloads_db[download_id]['status'] = 'downloading'
+       
+        socketio.emit('progress', {'download_id': download_id, 'progress': 0, 'status': 'downloading'})
+       
+        cmd = [YTDLP_EXEC, '--no-playlist', '--no-warnings', '--progress', '--newline']
+       
         if quality == "MUSIC":
-            cmd += ['-x', '--audio-format', fmt, '--audio-quality', '0', '--embed-thumbnail', '--add-metadata']
+            cmd.extend(['-x', '--audio-format', output_format, '--audio-quality', '0', '--embed-thumbnail', '--add-metadata'])
+            output_template = str(DOWNLOAD_DIR / f"{get_url_hash(url)}_%(title).60s.{output_format}")
         else:
             if quality != "none":
-                h = quality.replace("p", "")
-                cmd += ['-f', f'bestvideo[height<={h}]+bestaudio/best[height<={h}]']
-            if subs != "none":
-                cmd += ['--write-subs', '--sub-langs', subs, '--embed-subs']
-            cmd += ['--merge-output-format', fmt]
-        cmd += ['-o', template, url]
-
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-        last = 0
-        for line in proc.stdout:
+                height = quality.replace("p", "")
+                cmd.extend([ '-f', f'bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height}]' ])
+            else:
+                cmd.extend(['-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best'])
+           
+            if subtitle_lang != "none":
+                cmd.extend(['--write-subs', '--sub-langs', subtitle_lang, '--embed-subs'])
+           
+            cmd.extend(['--merge-output-format', output_format])
+            output_template = str(DOWNLOAD_DIR / f"{get_url_hash(url)}_%(title).60s.{output_format}")
+       
+        cmd.extend(['-o', output_template, url])
+       
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        last_progress = 0
+       
+        for line in process.stdout:
             if '[download]' in line and '%' in line:
-                m = re.search(r'(\d+(?:\.\d+)?)%', line)
-                if m:
-                    p = int(float(m.group(1)))
-                    if p - last >= 3 or p == 100:
-                        last = p
-                        with lock: db[did]['progress'] = p
-                        socketio.emit('progress', {'download_id': did, 'progress': p, 'status': 'downloading'})
-            elif '[ffmpeg]' in line or 'Merging' in line:
-                with lock: db[did]['status'] = 'converting'
-                socketio.emit('progress', {'download_id': did, 'progress': 95, 'status': 'converting'})
-
-        proc.wait()
-        if proc.returncode != 0: raise Exception("yt-dlp failed")
-
-        files = list(DOWNLOAD_DIR.glob(f"{hsh(url)}_*.{fmt}"))
-        if not files: raise Exception("File missing")
-        src = max(files, key=lambda x: x.stat().st_mtime)
-
-        new_name = clean(src.stem[len(hsh(url))+1:]) + f".{fmt}"
-        dst = DOWNLOAD_DIR / new_name
-        if not dst.exists():
-            src.rename(dst)
-
-        size = dst.stat().st_size
-        with lock:
-            db[did].update({'status': 'complete', 'filename': dst.name, 'size': size, 'progress': 100,
-                           'timestamp': datetime.now().isoformat()})
-        socketio.emit('progress', {'download_id': did, 'progress': 100, 'status': 'complete',
-                                  'filename': dst.name, 'size': size})
-
+                match = re.search(r'(\d+(?:\.\d+)?)%', line)
+                if match:
+                    progress = int(float(match.group(1)))
+                    if progress - last_progress >= 5 or progress == 100:
+                        last_progress = progress
+                        with downloads_lock:
+                            downloads_db[download_id]['progress'] = progress
+                        socketio.emit('progress', {'download_id': download_id, 'progress': progress, 'status': 'downloading'})
+           
+            elif any(x in line for x in ['[ffmpeg]', 'Merging', 'Converting']):
+                with downloads_lock:
+                    downloads_db[download_id]['status'] = 'converting'
+                socketio.emit('progress', {'download_id': download_id, 'progress': 95, 'status': 'converting'})
+       
+        process.wait()
+       
+        # SUCCESS + CLEAN FILENAME LOGIC (THIS WAS MISSING BEFORE!)
+        if process.returncode == 0:
+            files = list(DOWNLOAD_DIR.glob(f"{get_url_hash(url)}_*.{output_format}"))
+            if not files:
+                raise Exception("Downloaded file not found")
+            final_file = max(files, key=lambda x: x.stat().st_mtime)
+            dirty_title = final_file.stem[len(get_url_hash(url)) + 1 :]
+            clean_title = sanitize_filename(dirty_title)
+            if not clean_title:
+                clean_title = "download"
+            new_filename = f"{clean_title}.{output_format}"
+            new_path = DOWNLOAD_DIR / new_filename
+            if new_path.exists():
+                new_filename = final_file.name
+                new_path = final_file
+            else:
+                if new_path != final_file:
+                    final_file.rename(new_path)
+            file_size = new_path.stat().st_size
+            with downloads_lock:
+                downloads_db[download_id].update({
+                    'status': 'complete',
+                    'filename': new_filename,
+                    'progress': 100,
+                    'size': file_size,
+                    'timestamp': datetime.now().isoformat()
+                })
+            socketio.emit('progress', {
+                'download_id': download_id,
+                'progress': 100,
+                'status': 'complete',
+                'filename': new_filename,
+                'size': file_size
+            })
+        else:
+            raise Exception(f"yt-dlp exited with code {process.returncode}")
+   
     except Exception as e:
-        with lock: db[did]['status'] = 'error'; db[did]['error'] = str(e)
-        socketio.emit('progress', {'download_id': did, 'status': 'error', 'error': str(e)})
-
-def cleanup():
+        with downloads_lock:
+            downloads_db[download_id]['status'] = 'error'
+            downloads_db[download_id]['error'] = str(e)
+       
+        socketio.emit('progress', {
+            'download_id': download_id,
+            'progress': 0,
+            'status': 'error',
+            'error': str(e)
+        })
+# Cleanup thread (unchanged)
+def cleanup_worker():
     while True:
-        time.sleep(3600)
-        cutoff = time.time() - 48*3600
-        for f in DOWNLOAD_DIR.glob('*'):
-            if f.is_file() and f.stat().st_mtime < cutoff:
-                f.unlink(missing_ok=True)
-        with lock:
-            for k in list(db):
-                if db[k].get('status') == 'complete':
-                    try:
-                        if datetime.fromisoformat(db[k]['timestamp']).timestamp() < cutoff:
-                            del db[k]
-                    except: pass
-threading.Thread(target=cleanup, daemon=True).start()
-
+        try:
+            cutoff = time.time() - (CLEANUP_HOURS * 3600)
+            deleted = 0
+            for file_path in DOWNLOAD_DIR.glob('*'):
+                if file_path.is_file() and file_path.stat().st_mtime < cutoff:
+                    file_path.unlink()
+                    deleted += 1
+            if deleted > 0:
+                print(f"[CLEANUP] Removed {deleted} old files")
+           
+            with downloads_lock:
+                to_remove = [dl_id for dl_id, info in downloads_db.items()
+                            if info.get('status') == 'complete' and
+                            datetime.fromisoformat(info['timestamp']).timestamp() < cutoff]
+                for dl_id in to_remove:
+                    del downloads_db[dl_id]
+        except Exception as e:
+            print(f"[CLEANUP ERROR] {e}")
+        time.sleep(1800)
+threading.Thread(target=cleanup_worker, daemon=True).start()
+# Routes (unchanged - already perfect)
 @app.route('/')
 def index():
-    return '''<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Dwnloader</title>
-<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-<style>
-  body{font-family:system-ui;background:#0d0d0d;color:#eee;margin:0;padding:20px}
-  .c{max-width:900px;margin:auto;background:#111;padding:30px;border-radius:16px;border:1px solid #333}
-  h1{font-size:2.5em;background:linear-gradient(90deg,#8b5cf6,#3b82f6);-webkit-background-clip:text;color:transparent}
-  input,select,button{padding:14px;border-radius:12px;border:none;font-size:1em;margin:8px 0}
-  input,select{background:#222;color:#fff;flex:1}
-  button{background:linear-gradient(90deg,#8b5cf6,#3b82f6);color:#fff;cursor:pointer;font-weight:bold}
-  button:hover{transform:scale(1.05);transition:.2s}
-  .opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
-  .dl{background:#222;padding:16px;margin:12px 0;border-radius:12px;border:1px solid #444}
-  .bar{height:6px;background:#333;border-radius:3px;overflow:hidden;margin:10px 0}
-  .fill{height:100%;background:linear-gradient(90deg,#8b5cf6,#3b82f6);width:0%;transition:width .4s}
-  .status{padding:4px 12px;border-radius:20px;font-size:.8em;font-weight:bold}
-  .complete{background:#166534;color:#4ade80}
-  .downloading{background:#1e40af;color:#60a5fa}
-  .converting{background:#7c2d12;color:#fb923c}
-  .error{background:#7f1d1d;color:#fca5a5}
-</style></head><body>
-<div class="c">
-  <h1>Dwnloader</h1>
-  <p>Just paste any link — MP3 is default</p>
-  <div style="display:flex;gap:10px"><input type="text" id="url" placeholder="YouTube, TikTok, Instagram, SoundCloud...">
-  <button onclick="navigator.clipboard.readText().then(t=>document.getElementById('url').value=t)">Paste</button></div>
-  <div class="opts">
-    <select id="q" onchange="f.value=q.value==='MUSIC'?['mp3','m4a','opus','flac']:['mp4','mkv','webm'];f.innerHTML=f.value.map(x=>`<option value=${x} ${x==='mp3'&&q.value==='MUSIC'?'selected':''}>${x.toUpperCase()}</option>`).join('')">
-      <option value="MUSIC" selected>Audio Only</option>
-      <option value="720p">720p</option>
-      <option value="1080p">1080p</option>
-      <option value="2160p">4K</option>
-      <option value="none">Best Video</option>
-    </select>
-    <select id="f"><option value="mp3" selected>MP3</option><option value="m4a">M4A</option><option value="opus">OPUS</option><option value="flac">FLAC</option></select>
-    <select id="s"><option value="none">No Subs</option><option value="en">English</option></select>
-  </div>
-  <button style="width:100%;padding:16px;margin-top:12px" onclick="start()">Download Now</button>
-  <div id="list" style="margin-top:30px"></div>
-</div>
-<script>
-const socket=io(), d={}, q=document.getElementById('q'), f=document.getElementById('f');
-function start(){
-  const url=document.getElementById('url').value.trim();
-  if(!url)return;
-  fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({url,quality:q.value,format:f.value,subtitle_lang:document.getElementById('s').value})
-  }).then(r=>r.json()).then(res=>{
-    if(res.download_id){
-      d[res.download_id]={id:res.download_id,url,status:'starting',progress:0,filename:url};
-      render();
-      document.getElementById('url').value='';
-    }
-  });
-}
-function render(){
-  const list=document.getElementById('list');
-  const items=Object.values(d).sort((a,b)=> (b.timestamp||0)-(a.timestamp||0));
-  list.innerHTML=items.map(i=>`
-    <div class="dl">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <div style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${i.filename||i.url}">
-          ${i.filename||i.url}
-        </div>
-        <span class="status ${i.status}">${i.status.toUpperCase()}</span>
-      </div>
-      <div class="bar"><div class="fill" style="width:${i.progress||0}%"></div></div>
-      <small>${i.progress||0}% • ${i.size?((i.size/1024/1024).toFixed(1)+' MB'):'—'}</small>
-      ${i.status==='complete'?` <button onclick="location.href='/api/get/${i.id}'" style="float:right;padding:8px 16px;margin-top:8px">Download File</button>`:''}
-    </div>
-  `).join('') || '<p style="text-align:center;color:#666">No downloads yet — paste a link above!</p>';
-}
-socket.on('progress', p=>{ if(d[p.download_id]){ Object.assign(d[p.download_id], p); render(); } });
-socket.on('connect', ()=> fetch('/api/list').then(r=>r.json()).then(data=>{ Object.assign(d,data); render(); }));
-q.onchange(); render();
-</script></body></html>'''
-
-@app.route('/api/start', methods=['POST'])
-def start():
+    return '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Dwnloader</title><script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0a0a;color:#e0e0e0;min-height:100vh;padding:20px}.container{max-width:1200px;margin:0 auto}.header{text-align:center;margin-bottom:40px;padding:20px;background:linear-gradient(135deg,#1a1a1a,#2a2a2a);border-radius:12px;border:1px solid #333}h1{font-size:2rem;margin-bottom:8px;background:linear-gradient(135deg,#60a5fa,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent}p{color:#888;font-size:.9rem}.input-section{background:#1a1a1a;padding:24px;border-radius:12px;margin-bottom:24px;border:1px solid #333}.input-group{display:flex;gap:12px;margin-bottom:16px}input,select{background:#0a0a0a;border:1px solid #333;color:#e0e0e0;padding:12px;border-radius:8px;font-size:.95rem;transition:all .2s;flex:1}input:focus,select:focus{outline:none;border-color:#60a5fa;box-shadow:0 0 0 2px rgba(96,165,250,.1)}.options{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}button{padding:12px 24px;border:none;border-radius:8px;font-weight:600;cursor:pointer;transition:all .2s}.btn-primary{background:linear-gradient(135deg,#60a5fa,#a78bfa);color:white;width:100%}.btn-primary:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(96,165,250,.4)}.btn-primary:disabled{opacity:.5;cursor:not-allowed;transform:none}.downloads{background:#1a1a1a;border-radius:12px;padding:24px;border:1px solid #333}h2{margin-bottom:20px;font-size:1.3rem}.download-card{background:#0a0a0a;border:1px solid #333;border-radius:8px;padding:16px;margin-bottom:12px;transition:all .2s}.download-card:hover{border-color:#444;transform:translateX(4px)}.download-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:12px}.download-url{flex:1;color:#888;font-size:.85rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.status{padding:4px 12px;border-radius:12px;font-size:.75rem;font-weight:600}.status-downloading{background:#1e3a8a;color:#60a5fa}.status-converting{background:#581c87;color:#a78bfa}.status-complete{background:#065f46;color:#34d399}.status-error{background:#7f1d1d;color:#f87171}.progress-bar{height:4px;background:#2a2a2a;border-radius:2px;overflow:hidden;margin-bottom:12px}.progress-fill{height:100%;background:linear-gradient(90deg,#60a5fa,#a78bfa);transition:width .3s}.download-info{display:flex;justify-content:space-between;font-size:.8rem;color:#666;margin-bottom:8px;gap:16px}.btn-download{background:#065f46;color:#34d399;width:100%;margin-top:8px}.btn-download:hover{background:#047857}.empty{text-align:center;padding:60px 20px;color:#666}.alert{padding:12px;border-radius:8px;margin-bottom:16px;font-size:.9rem}.alert-error{background:#7f1d1d;color:#f87171}.alert-info{background:#1e3a8a;color:#60a5fa}@media(max-width:768px){.input-group{flex-direction:column}.options{grid-template-columns:1fr}.download-header{flex-direction:column;align-items:flex-start}}</style></head><body><div class="container"><div class="header"><h1>Dwnloader</h1><p>Blazingly fast video & audio downloader</p></div><div class="input-section"><div id="alert"></div><div class="input-group"><input type="text" id="url" placeholder="Paste video or music URL..."><button class="btn-secondary" onclick="paste()">Paste</button></div><div class="options"><select id="quality" onchange="updateFormats()"><option value="MUSIC" selected>Audio</option><option value="720p">720p</option><option value="1080p">1080p</option><option value="1440p">1440p</option><option value="2160p">4K</option><option value="none">Best Video</option></select><select id="format"><option value="mp3" selected>MP3</option><option value="m4a">M4A</option><option value="flac">FLAC</option><option value="wav">WAV</option><option value="opus">OPUS</option><option value="mp4">MP4</option><option value="mkv">MKV</option><option value="webm">WebM</option></select><select id="subtitle"><option value="none">No Subs</option><option value="en">English</option><option value="es">Spanish</option><option value="fr">French</option><option value="de">German</option></select></div><button class="btn-primary" id="dlBtn" onclick="startDownload()">Download</button></div><div class="downloads"><h2>All Downloads</h2><div id="list"></div></div></div><script>const socket=io();const downloads={};const VIDEO_FORMATS=['mp4','mkv','webm','avi'];const AUDIO_FORMATS=['mp3','m4a','flac','wav','opus'];socket.on('progress',d=>{downloads[d.download_id]={...downloads[d.download_id],...d};render();});function formatBytes(b){if(!b)return'0 B';const k=1024,s=['B','KB','MB','GB'],i=Math.floor(Math.log(b)/Math.log(k));return Math.round((b/Math.pow(k,i))*100)/100+' '+s[i];}function formatTime(t){return t?new Date(t).toLocaleString():'';}async function paste(){try{document.getElementById('url').value=await navigator.clipboard.readText();}catch(e){alert('Paste manually');}}function updateFormats(){const q=document.getElementById('quality').value,f=document.getElementById('format'),formats=q==='MUSIC'?AUDIO_FORMATS:VIDEO_FORMATS;f.innerHTML='';formats.forEach(fmt=>{const opt=document.createElement('option');opt.value=fmt;opt.textContent=fmt.toUpperCase();if(q==='MUSIC'&&fmt==='mp3')opt.selected=true;if(q!=='MUSIC'&&fmt==='mp4')opt.selected=true;f.appendChild(opt);});}async function startDownload(){const url=document.getElementById('url').value.trim();if(!url)return showAlert('Enter a URL','error');const btn=document.getElementById('dlBtn');btn.disabled=true;btn.textContent='Starting...';try{const res=await fetch('/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,quality:document.getElementById('quality').value,format:document.getElementById('format').value,subtitle_lang:document.getElementById('subtitle').value})});const data=await res.json();if(res.ok){downloads[data.download_id]={id:data.download_id,url,status:'starting',progress:0,timestamp:new Date().toISOString()};render();showAlert('Download started!','info');document.getElementById('url').value='';}else{showAlert(data.error||'Failed','error');}}catch(e){showAlert('Network error','error');}finally{btn.disabled=false;btn.textContent='Download';}}function showAlert(m,t){const a=document.getElementById('alert');a.innerHTML=`<div class="alert alert-${t}">${m}</div>`;setTimeout(()=>a.innerHTML='',4000);}function render(){const list=document.getElementById('list');const items=Object.values(downloads).sort((a,b)=>new Date(b.timestamp||0)-new Date(a.timestamp||0));if(!items.length){list.innerHTML='<div class="empty">No downloads yet</div>';return;}list.innerHTML=items.map(d=>`<div class="download-card"><div class="download-header"><div class="download-url" title="${d.filename||d.url}">${d.filename||d.url}</div><div class="status status-${d.status}">${d.status.toUpperCase()}</div></div><div class="progress-bar"><div class="progress-fill" style="width:${d.progress||0}%"></div></div><div class="download-info"><span>${d.progress||0}% - ${formatBytes(d.size||0)}</span></div>${d.timestamp?`<div style="font-size:.75rem;color:#555;margin-top:4px">Date: ${formatTime(d.timestamp)}</div>`:''}${d.status==='complete'?`<button class="btn-download" onclick="window.location.href='/api/download/${d.id}'">Download File</button>`:''}</div>`).join('');}socket.on('connect',()=>{fetch('/api/downloads').then(r=>r.json()).then(d=>Object.assign(downloads,d)).then(render);});window.onload=()=>{updateFormats();};</script></body></html>'''
+@app.route('/api/check')
+def check_system():
+    return jsonify({'ytdlp_installed': check_ytdlp(), 'downloads': len(downloads_db), 'active': len([d for d in downloads_db.values() if d['status'] in ['downloading','converting']])})
+@app.route('/api/download', methods=['POST'])
+def start_download():
     data = request.json
     url = data.get('url','').strip()
-    if not url: return jsonify(error="No URL"), 400
-    did = str(uuid.uuid4())
-    with lock:
-        db[did] = {'id':did,'url':url,'status':'starting','progress':0,'timestamp':datetime.now().isoformat()}
-    threading.Thread(target=worker, args=(did, url, data.get('quality','MUSIC'), data.get('subtitle_lang','none'), data.get('format','mp3')), daemon=True).start()
-    return jsonify(download_id=did)
-
-@app.route('/api/get/<did>')
-def get(did):
-    with lock:
-        info = db.get(did)
-        if not info or info['status'] != 'complete': return "Not ready", 404
-        path = DOWNLOAD_DIR / info['filename']
-        if not path.exists(): return "File gone", 404
-        return send_file(path, as_attachment=True, download_name=info['filename'])
-
-@app.route('/api/list')
-def list(): 
-    with lock: return jsonify(db)
-
+    quality = data.get('quality','MUSIC')        # default to MUSIC now
+    subtitle_lang = data.get('subtitle_lang','none')
+    output_format = data.get('format','mp3')     # default to mp3 now
+   
+    if not url: return jsonify({'error': 'URL required'}), 400
+    if not check_ytdlp(): return jsonify({'error': 'yt-dlp not installed'}), 500
+   
+    active = len([d for d in downloads_db.values() if d['status'] in ['downloading','converting']])
+    if active >= MAX_CONCURRENT: return jsonify({'error': f'Max {MAX_CONCURRENT} concurrent downloads'}), 429
+   
+    download_id = str(uuid.uuid4())
+    with downloads_lock:
+        downloads_db[download_id] = {'id': download_id, 'url': url, 'quality': quality, 'format': output_format, 'status': 'starting', 'progress': 0, 'timestamp': datetime.now().isoformat()}
+   
+    threading.Thread(target=download_worker, args=(download_id, url, quality, subtitle_lang, output_format), daemon=True).start()
+    return jsonify({'download_id': download_id})
+@app.route('/api/download/<download_id>')
+def get_file(download_id):
+    with downloads_lock:
+        info = downloads_db.get(download_id)
+        if not info or info['status'] != 'complete':
+            return jsonify({'error': 'Not ready'}), 404
+        file_path = DOWNLOAD_DIR / info['filename']
+        if not file_path.exists():
+            return jsonify({'error': 'File missing'}), 404
+        return send_file(file_path, as_attachment=True, download_name=info['filename'])
+@app.route('/api/downloads')
+def list_downloads():
+    with downloads_lock:
+        return jsonify(downloads_db)
 if __name__ == '__main__':
-    print("Dwnloader v4.0 started — http://0.0.0.0:5000")
-    socketio.run(app, host='0.0.0.0', port=5000)
+    print("="*60)
+    print("DWNLOADER - Now with perfectly clean filenames + AUDIO/MP3 DEFAULT!")
+    print("="*60)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
 EOF
-echo -e "$OK ${P}Dwnloader v4.0 deployed — real-time progress fixed!$NC"
-
-cat > /usr/local/bin/update-ytdlp.sh << 'EOF'
+mkdir -p downloads
+chown -R dwnloader:dwnloader $INSTALL_DIR
+# Rest of your original script (unchanged)
+cat > /usr/local/bin/update-ytdlp.sh << 'EOFUPDATE'
 #!/bin/bash
-echo "[$(date)] Updating yt-dlp..." >> /var/log/ytdlp-update.log
-curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp -s
+echo "[$(date +'%Y-%m-%d %H:%M:%S')] Updating yt-dlp..."
+curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
 chmod a+rx /usr/local/bin/yt-dlp
-echo "[$(date)] yt-dlp updated" >> /var/log/ytdlp-update.log
-EOF
-chmod +x /usr/local/bin/update-ytdlp.sh
-(crontab -l 2>/dev/null | grep -v update-ytdlp; echo "17 4 * * * /usr/local/bin/update-ytdlp.sh") | crontab -
-
-cat > /etc/systemd/system/$SERVICE.service << EOF
+echo "[$(date +'%Y-%m-%d %H:%M:%S')] yt-dlp updated"
+EOFUPDATE
+chmod a+rx /usr/local/bin/update-ytdlp.sh
+cat > /etc/cron.daily/update-ytdlp << 'EOFCRON'
+#!/bin/bash
+/usr/local/bin/update-ytdlp.sh >> /var/log/ytdlp-update.log 2>&1
+EOFCRON
+chmod a+rx /etc/cron.daily/update-ytdlp
+if [ "$UPDATING" = false ]; then
+    cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
 [Unit]
-Description=Dwnloader v4.0 — Real-time MP3 Downloader
+Description=Dwnloader - Video/Audio Downloader Service
 After=network.target
 [Service]
 Type=simple
 User=dwnloader
+Group=dwnloader
 WorkingDirectory=$INSTALL_DIR
 Environment="PATH=$INSTALL_DIR/venv/bin:/usr/local/bin:/usr/bin"
+Environment="DOWNLOAD_DIR=$INSTALL_DIR/downloads"
+Environment="MAX_CONCURRENT=3"
+Environment="CLEANUP_HOURS=24"
 ExecStart=$INSTALL_DIR/venv/bin/python app.py
 Restart=always
-RestartSec=5
+RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
-
+fi
 systemctl daemon-reload
-systemctl enable --now $SERVICE > /dev/null 2>&1
-sleep 3
-
-IP=$(hostname -I | awk '{print $1}')
-
-clear
-echo -e "${P} ______            _        _        _______  _______  ______   _______  _______ "
-echo -e "${P}(  __  \ |\     /|( (    /|( \      (  ___  )(  ___  )(  __  \ (  ____ \(  ____ )"
-echo -e "${P}| (  \  )| )   ( ||  \  ( || (      | (   ) || (   ) || (  \  )| (    \/| (    )|"
-echo -e "${P}| |   ) || | _ | ||   \ | || |      | |   | || (___) || |   ) || (__    | (____)|"
-echo -e "${P}| |   | || |( )| || (\ \) || |      | |   | ||  ___  || |   | ||  __)   |     __)"
-echo -e "${P}| |   ) || || || || | \   || |      | |   | || (   ) || |   ) || (      | (\ (   "
-echo -e "${P}| (__/  )| () () || )  \  || (____/\| (___) || )   ( || (__/  )| (____/\| ) \ \__"
-echo -e "${P}(______/ (_______)|/    )_)(_______/(_______)|/     \|(______/ (_______/|/   \__/${C}v4.0$NC"
-echo -e ""
-echo -e "   ${G}Installation complete!${NC}"
-echo -e ""
-echo -e "   ${ROCKET} Open now → ${W}http://$IP:5000${NC}"
-echo -e "   ${MUSIC} Default: MP3 + Audio (just paste any link!)"
-echo -e "   ${FIRE} Real-time progress bar — no refresh needed"
-echo -e "   ${SPARK} Clean beautiful filenames every time"
-echo -e ""
-echo -e "   ${C}Enjoy the best downloader ever made.${NC}"
-echo -e ""
+[ "$UPDATING" = false ] && systemctl enable $SERVICE_NAME
+systemctl start $SERVICE_NAME
+sleep 2
+echo ""
+echo "=================================================="
+[ "$UPDATING" = true ] && echo "UPDATE Complete! (Clean filenames + Audio/MP3 default)" || echo "INSTALLATION Complete!"
+echo "=================================================="
+echo "Access: http://$(hostname -I | awk '{print $1}'):5000"
+echo "Status: systemctl status $SERVICE_NAME"
+echo "=================================================="
