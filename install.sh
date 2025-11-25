@@ -1,4 +1,33 @@
-#!/bin/bash
+if process.returncode == 0:
+            files = list(DOWNLOAD_DIR.glob(f"{get_url_hash(url)}_*.{output_format}"))
+            if files:
+                newest_file = max(files, key=lambda x: x.stat().st_mtime)
+                # Extract and sanitize filename
+                original_name = newest_file.stem.replace(get_url_hash(url) + '_', '')
+                clean_name = sanitize_filename(original_name)
+                clean_filename = f"{clean_name}.{output_format}"
+                clean_file_path = DOWNLOAD_DIR / clean_filename
+                
+                # Rename file if needed
+                if clean_filename != newest_file.name:
+                    newest_file.rename(clean_file_path)
+                    newest_file = clean_file_path
+                
+                with downloads_lock:
+                    downloads_db[download_id]['status'] = 'complete'
+                    downloads_db[download_id]['filename'] = clean_filename
+                    downloads_db[download_id]['progress'] = 100
+                    downloads_db[download_id]['size'] = newest_file.stat().st_size
+                    downloads_db[download_id]['timestamp'] = datetime.now().isoformat()
+                
+                socketio.emit('progress', {
+                    'download_id': download_id,
+                    'progress': 100,
+                    'status': 'complete',
+                    'filename': clean_filename,
+                    'size': newest_file.stat().st_size,
+                    'timestamp': datetime.now().isoformat()
+                })#!/bin/bash
 
 # Dwnloader - Ubuntu Server Installation/Update Script
 # Run with: sudo bash install.sh
@@ -115,6 +144,21 @@ def check_ytdlp():
 
 def get_url_hash(url):
     return hashlib.md5(url.encode()).hexdigest()[:12]
+
+def sanitize_filename(filename):
+    """Remove non-ASCII and special characters, keep only letters, numbers, spaces, hyphens, underscores"""
+    import unicodedata
+    # Remove file extension
+    name_without_ext = filename.rsplit('.', 1)[0] if '.' in filename else filename
+    # Normalize unicode and remove diacritics
+    normalized = unicodedata.normalize('NFKD', name_without_ext)
+    # Keep only ASCII letters, numbers, spaces, hyphens, underscores
+    sanitized = ''.join(c for c in normalized if c.isascii() and (c.isalnum() or c in ' -_'))
+    # Remove multiple spaces and strip
+    sanitized = ' '.join(sanitized.split())
+    # Remove leading/trailing hyphens or underscores
+    sanitized = sanitized.strip(' -_')
+    return sanitized if sanitized else 'download'
 
 def download_worker(download_id, url, quality, subtitle_lang, output_format):
     try:
@@ -303,7 +347,8 @@ def index():
         .status-error { background: #7f1d1d; color: #f87171; }
         .progress-bar { height: 4px; background: #2a2a2a; border-radius: 2px; overflow: hidden; margin-bottom: 12px; }
         .progress-fill { height: 100%; background: linear-gradient(90deg, #60a5fa 0%, #a78bfa 100%); transition: width 0.3s; }
-        .download-info { display: flex; justify-content: space-between; font-size: 0.8rem; color: #666; margin-bottom: 8px; }
+        .download-info { display: flex; justify-content: space-between; font-size: 0.8rem; color: #666; margin-bottom: 8px; gap: 16px; }
+        .download-time { font-size: 0.75rem; color: #555; margin-top: 4px; }
         .btn-download { background: #065f46; color: #34d399; width: 100%; }
         .btn-download:hover { background: #047857; }
         .empty { text-align: center; padding: 60px 20px; color: #666; }
@@ -359,17 +404,133 @@ def index():
         const downloads = {};
         const VIDEO_FORMATS = ['mp4', 'mkv', 'webm', 'avi'];
         const AUDIO_FORMATS = ['mp3', 'm4a', 'flac', 'wav', 'opus'];
-        socket.on('progress', (data) => { downloads[data.download_id] = { ...downloads[data.download_id], ...data }; render(); });
-        async function paste() { try { document.getElementById('url').value = await navigator.clipboard.readText(); } catch (e) { alert('Paste manually or grant clipboard permission'); } }
-        function updateFormats() { const quality = document.getElementById('quality').value; const formatSelect = document.getElementById('format'); const formats = quality === 'MUSIC' ? AUDIO_FORMATS : VIDEO_FORMATS; formatSelect.innerHTML = formats.map(f => `<option value="${f}">${f.toUpperCase()}</option>`).join(''); }
-        async function startDownload() { const url = document.getElementById('url').value.trim(); if (!url) return showAlert('Enter a URL', 'error'); const btn = document.getElementById('dlBtn'); btn.disabled = true; btn.textContent = 'Starting...'; try { const res = await fetch('/api/download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, quality: document.getElementById('quality').value, format: document.getElementById('format').value, subtitle_lang: document.getElementById('subtitle').value }) }); const data = await res.json(); if (res.ok) { downloads[data.download_id] = { id: data.download_id, url, status: 'starting', progress: 0 }; render(); showAlert('Download started!', 'info'); document.getElementById('url').value = ''; } else { showAlert(data.error || 'Failed', 'error'); } } catch (e) { showAlert('Network error', 'error'); } finally { btn.disabled = false; btn.textContent = '⬇ Download'; } }
-        function showAlert(msg, type) { const alert = document.getElementById('alert'); alert.innerHTML = `<div class="alert alert-${type}">${msg}</div>`; setTimeout(() => alert.innerHTML = '', 4000); }
-        function formatSize(bytes) { if (!bytes) return ''; const mb = bytes / (1024 * 1024); return mb > 1 ? `${mb.toFixed(1)} MB` : `${(bytes / 1024).toFixed(0)} KB`; }
-        function render() { const list = document.getElementById('list'); const items = Object.values(downloads).reverse(); if (items.length === 0) { list.innerHTML = '<div class="empty">No downloads yet</div>'; return; } list.innerHTML = items.map(d => `<div class="download-card"><div class="download-header"><div class="download-url" title="${d.url}">${d.url}</div><div class="status status-${d.status}">${d.status.toUpperCase()}</div></div><div class="progress-bar"><div class="progress-fill" style="width: ${d.progress || 0}%"></div></div><div class="download-info"><span>${d.progress || 0}%</span><span>${formatSize(d.size)}</span></div>${d.status === 'complete' ? `<button class="btn-download" onclick="download('${d.id}')">💾 Download ${d.filename}</button>` : ''}</div>`).join(''); }
-        function download(id) { window.location.href = `/api/download/${id}`; }
-        async function loadDownloads() { try { const res = await fetch('/api/downloads'); const data = await res.json(); Object.assign(downloads, data); render(); } catch (e) { console.error('Failed to load downloads', e); } }
+        
+        socket.on('progress', (data) => { 
+            downloads[data.download_id] = { ...downloads[data.download_id], ...data }; 
+            render(); 
+        });
+        
+        function formatBytes(bytes) {
+            if (!bytes) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
+        }
+        
+        function formatTime(isoString) {
+            if (!isoString) return '';
+            const date = new Date(isoString);
+            return date.toLocaleString();
+        }
+        
+        async function paste() { 
+            try { 
+                document.getElementById('url').value = await navigator.clipboard.readText(); 
+            } catch (e) { 
+                alert('Paste manually or grant clipboard permission'); 
+            } 
+        }
+        
+        function updateFormats() { 
+            const quality = document.getElementById('quality').value; 
+            const formatSelect = document.getElementById('format'); 
+            const formats = quality === 'MUSIC' ? AUDIO_FORMATS : VIDEO_FORMATS; 
+            formatSelect.innerHTML = formats.map(f => `<option value="${f}">${f.toUpperCase()}</option>`).join(''); 
+        }
+        
+        async function startDownload() { 
+            const url = document.getElementById('url').value.trim(); 
+            if (!url) return showAlert('Enter a URL', 'error'); 
+            const btn = document.getElementById('dlBtn'); 
+            btn.disabled = true; 
+            btn.textContent = 'Starting...'; 
+            try { 
+                const res = await fetch('/api/download', { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ 
+                        url, 
+                        quality: document.getElementById('quality').value, 
+                        format: document.getElementById('format').value, 
+                        subtitle_lang: document.getElementById('subtitle').value 
+                    }) 
+                }); 
+                const data = await res.json(); 
+                if (res.ok) { 
+                    downloads[data.download_id] = { 
+                        id: data.download_id, 
+                        url, 
+                        status: 'starting', 
+                        progress: 0,
+                        timestamp: new Date().toISOString()
+                    }; 
+                    render(); 
+                    showAlert('Download started!', 'info'); 
+                    document.getElementById('url').value = ''; 
+                } else { 
+                    showAlert(data.error || 'Failed', 'error'); 
+                } 
+            } catch (e) { 
+                showAlert('Network error', 'error'); 
+            } finally { 
+                btn.disabled = false; 
+                btn.textContent = '⬇ Download'; 
+            } 
+        }
+        
+        function showAlert(msg, type) { 
+            const alert = document.getElementById('alert'); 
+            alert.innerHTML = `<div class="alert alert-${type}">${msg}</div>`; 
+            setTimeout(() => alert.innerHTML = '', 4000); 
+        }
+        
+        function render() { 
+            const list = document.getElementById('list'); 
+            const items = Object.values(downloads).reverse(); 
+            if (items.length === 0) { 
+                list.innerHTML = '<div class="empty">No downloads yet</div>'; 
+                return; 
+            } 
+            list.innerHTML = items.map(d => {
+                const timeStr = formatTime(d.timestamp);
+                return `<div class="download-card">
+                    <div class="download-header">
+                        <div class="download-url" title="${d.filename || d.url}">${d.filename || d.url}</div>
+                        <div class="status status-${d.status}">${d.status.toUpperCase()}</div>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${d.progress || 0}%"></div>
+                    </div>
+                    <div class="download-info">
+                        <span>${d.progress || 0}% - ${formatBytes(d.size || 0)}</span>
+                    </div>
+                    ${timeStr ? `<div class="download-time">📅 ${timeStr}</div>` : ''}
+                    ${d.status === 'complete' ? `<button class="btn-download" onclick="download('${d.id}')">💾 Download</button>` : ''}
+                </div>`;
+            }).join(''); 
+        }
+        
+        function download(id) { 
+            window.location.href = `/api/download/${id}`; 
+        }
+        
+        async function loadDownloads() { 
+            try { 
+                const res = await fetch('/api/downloads'); 
+                const data = await res.json(); 
+                Object.assign(downloads, data); 
+                render(); 
+            } catch (e) { 
+                console.error('Failed to load downloads', e); 
+            } 
+        }
+        
         socket.on('connect', loadDownloads);
-        window.onload = () => { updateFormats(); loadDownloads(); };
+        window.onload = () => { 
+            updateFormats(); 
+            loadDownloads(); 
+        };
     </script>
 </body>
 </html>'''
