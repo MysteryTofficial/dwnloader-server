@@ -487,7 +487,11 @@ def index():
         
         function render() { 
             const list = document.getElementById('list'); 
-            const items = Object.values(downloads).reverse(); 
+            const items = Object.values(downloads).sort((a, b) => {
+                const timeA = new Date(a.timestamp || 0).getTime();
+                const timeB = new Date(b.timestamp || 0).getTime();
+                return timeB - timeA;
+            }); 
             if (items.length === 0) { 
                 list.innerHTML = '<div class="empty">No downloads yet</div>'; 
                 return; 
