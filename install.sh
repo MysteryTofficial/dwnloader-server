@@ -1,32 +1,46 @@
 if process.returncode == 0:
-            files = list(DOWNLOAD_DIR.glob(f"{get_url_hash(url)}_*.{output_format}"))
-            if files:
-                newest_file = max(files, key=lambda x: x.stat().st_mtime)
-                # Extract and sanitize filename
-                original_name = newest_file.stem.replace(get_url_hash(url) + '_', '')
-                clean_name = sanitize_filename(original_name)
-                clean_filename = f"{clean_name}.{output_format}"
-                clean_file_path = DOWNLOAD_DIR / clean_filename
-                
-                # Rename file if needed
-                if clean_filename != newest_file.name:
-                    newest_file.rename(clean_file_path)
-                    newest_file = clean_file_path
-                
-                with downloads_lock:
-                    downloads_db[download_id]['status'] = 'complete'
-                    downloads_db[download_id]['filename'] = clean_filename
-                    downloads_db[download_id]['progress'] = 100
-                    downloads_db[download_id]['size'] = newest_file.stat().st_size
-                    downloads_db[download_id]['timestamp'] = datetime.now().isoformat()
-                
-                socketio.emit('progress', {
-                    'download_id': download_id,
-                    'progress': 100,
-                    'status': 'complete',
-                    'filename': clean_filename,
-                    'size': newest_file.stat().st_size
-                })
+    files = list(DOWNLOAD_DIR.glob(f"{get_url_hash(url)}_*.{output_format}"))
+    if not files:
+        raise Exception("Downloaded file not found")
+
+    # Pick newest file (in case of thumbnails etc.)
+    final_file = max(files, key=lambda x: x.stat().st_mtime)
+
+    # --- Clean filename while keeping uniqueness ---
+    dirty_title = final_file.stem[len(get_url_hash(url)) + 1 :]  # remove "hash_"
+    clean_title = sanitize_filename(dirty_title)
+    if not clean_title:
+        clean_title = "download"
+
+    new_filename = f"{clean_title}.{output_format}"
+    new_path = DOWNLOAD_DIR / new_filename
+
+    # Avoid collision: if file with clean name already exists, keep hash prefix
+    if new_path.exists():
+        new_filename = final_file.name  # fallback to original safe name
+        new_path = final_file
+    else:
+        if new_path != final_file:
+            final_file.rename(new_path)
+
+    file_size = new_path.stat().st_size
+
+    with downloads_lock:
+        downloads_db[download_id].update({
+            'status': 'complete',
+            'filename': new_filename,         # ← important: clean name
+            'progress': 100,
+            'size': file_size,
+            'timestamp': datetime.now().isoformat()
+        })
+
+    socketio.emit('progress', {
+        'download_id': download_id,
+        'progress': 100,
+        'status': 'complete',
+        'filename': new_filename,
+        'size': file_size
+    })
 #!/bin/bash
 
 # Dwnloader - Ubuntu Server Installation/Update Script
@@ -590,19 +604,19 @@ def start_download():
 @app.route('/api/download/<download_id>')
 def get_file(download_id):
     with downloads_lock:
-        if download_id not in downloads_db:
-            return jsonify({'error': 'Not found'}), 404
-        download_info = downloads_db[download_id]
-    
-    if download_info['status'] != 'complete':
-        return jsonify({'error': 'Not ready'}), 400
-    
-    file_path = DOWNLOAD_DIR / download_info['filename']
-    
-    if not file_path.exists():
-        return jsonify({'error': 'File not found'}), 404
-    
-    return send_file(file_path, as_attachment=True)
+        info = downloads_db.get(download_id)
+        if not info or info['status'] != 'complete':
+            return jsonify({'error': 'Not ready or not found'}), 404
+
+        file_path = DOWNLOAD_DIR / info['filename']
+        if not file_path.exists():
+            return jsonify({'error': 'File missing'}), 404
+
+        return send_file(
+            file_path,
+            as_attachment=True,
+            download_name=info['filename']   # ← forces clean title
+        )
 
 @app.route('/api/downloads')
 def list_downloads():
