@@ -26,7 +26,8 @@ if process.returncode == 0:
                     'status': 'complete',
                     'filename': clean_filename,
                     'size': newest_file.stat().st_size
-                })#!/bin/bash
+                })
+#!/bin/bash
 
 # Dwnloader - Ubuntu Server Installation/Update Script
 # Run with: sudo bash install.sh
