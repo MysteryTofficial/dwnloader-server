@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# Dwnloader - Ubuntu Server Installation Script
+# Dwnloader - Ubuntu Server Installation/Update Script
 # Run with: sudo bash install.sh
 
 set -e
 
 echo "=================================================="
-echo "⚡ DWNLOADER - Installation Script"
+echo "⚡ DWNLOADER - Installation/Update Script"
 echo "=================================================="
 
 # Check if running as root
@@ -15,37 +15,67 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-echo "📦 Installing system dependencies..."
+INSTALL_DIR="/opt/dwnloader"
+SERVICE_NAME="dwnloader"
+UPDATING=false
+
+# Check if already installed
+if [ -d "$INSTALL_DIR" ]; then
+    echo "📦 Existing installation detected at $INSTALL_DIR"
+    echo "🔄 Running UPDATE mode..."
+    UPDATING=true
+    
+    # Stop the service if running
+    if systemctl is-active --quiet $SERVICE_NAME; then
+        echo "🛑 Stopping $SERVICE_NAME service..."
+        systemctl stop $SERVICE_NAME
+    fi
+else
+    echo "📦 Running FRESH INSTALLATION mode..."
+fi
+
+echo "📦 Installing/Updating system dependencies..."
 apt-get update
 apt-get install -y python3 python3-pip python3-venv ffmpeg curl
 
-echo "📥 Installing yt-dlp..."
+echo "📥 Installing/Updating yt-dlp..."
 curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
 chmod a+rx /usr/local/bin/yt-dlp
 
-echo "👤 Creating dwnloader user..."
-if ! id -u dwnloader &>/dev/null; then
-    useradd -r -m -s /bin/bash dwnloader
+if [ "$UPDATING" = false ]; then
+    echo "👤 Creating dwnloader user..."
+    if ! id -u dwnloader &>/dev/null; then
+        useradd -r -m -s /bin/bash dwnloader
+    fi
 fi
 
 echo "📁 Setting up application directory..."
-INSTALL_DIR="/opt/dwnloader"
 mkdir -p $INSTALL_DIR
 cd $INSTALL_DIR
 
-echo "🐍 Creating Python virtual environment..."
-python3 -m venv venv
+if [ "$UPDATING" = true ]; then
+    echo "💾 Backing up old app.py..."
+    if [ -f "app.py" ]; then
+        cp app.py app.py.backup.$(date +%Y%m%d_%H%M%S)
+    fi
+fi
+
+echo "🐍 Setting up Python virtual environment..."
+if [ ! -d "venv" ]; then
+    python3 -m venv venv
+fi
+
 source venv/bin/activate
 
-echo "📦 Installing Python dependencies..."
+echo "📦 Installing/Updating Python dependencies..."
 pip install --upgrade pip
-pip install flask flask-socketio eventlet
+pip install --upgrade flask flask-socketio python-socketio python-engineio eventlet
 
-echo "📝 Creating app.py..."
+echo "📝 Creating/Updating app.py..."
 cat > app.py << 'EOFAPP'
 """
 Dwnloader - Blazingly Fast Multi-User Video/Audio Downloader
-Optimized version with shared downloads view
+Fixed version - No broadcast parameter
 """
 
 from flask import Flask, request, jsonify, send_file
@@ -433,8 +463,36 @@ mkdir -p downloads
 echo "🔧 Setting permissions..."
 chown -R dwnloader:dwnloader $INSTALL_DIR
 
-echo "🚀 Creating systemd service..."
-cat > /etc/systemd/system/dwnloader.service << EOF
+echo "📝 Creating yt-dlp daily update script..."
+cat > /usr/local/bin/update-ytdlp.sh << 'EOFUPDATE'
+#!/bin/bash
+# Daily yt-dlp update script
+echo "[$(date +'%Y-%m-%d %H:%M:%S')] Checking for yt-dlp updates..."
+curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+chmod a+rx /usr/local/bin/yt-dlp
+echo "[$(date +'%Y-%m-%d %H:%M:%S')] yt-dlp updated successfully"
+EOFUPDATE
+
+chmod a+rx /usr/local/bin/update-ytdlp.sh
+
+echo "⏰ Creating cron job for daily updates..."
+cat > /etc/cron.daily/update-ytdlp << 'EOFCRON'
+#!/bin/bash
+/usr/local/bin/update-ytdlp.sh >> /var/log/ytdlp-update.log 2>&1
+EOFCRON
+
+chmod a+rx /etc/cron.daily/update-ytdlp
+
+if [ "$UPDATING" = false ]; then
+    echo "👤 Creating dwnloader user..."
+    if ! id -u dwnloader &>/dev/null; then
+        useradd -r -m -s /bin/bash dwnloader
+    fi
+fi
+
+if [ "$UPDATING" = false ]; then
+    echo "🚀 Creating systemd service..."
+    cat > /etc/systemd/system/$SERVICE_NAME.service << EOF
 [Unit]
 Description=Dwnloader - Video/Audio Downloader Service
 After=network.target
@@ -455,32 +513,48 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
+fi
 
 echo "🔄 Reloading systemd..."
 systemctl daemon-reload
 
-echo "✅ Enabling service..."
-systemctl enable dwnloader
+if [ "$UPDATING" = false ]; then
+    echo "✅ Enabling service..."
+    systemctl enable $SERVICE_NAME
+fi
 
 echo "🚀 Starting service..."
-systemctl start dwnloader
+systemctl start $SERVICE_NAME
+
+# Wait a moment for service to start
+sleep 2
 
 echo ""
 echo "=================================================="
-echo "✅ Installation Complete!"
+if [ "$UPDATING" = true ]; then
+    echo "✅ UPDATE Complete!"
+else
+    echo "✅ INSTALLATION Complete!"
+fi
 echo "=================================================="
 echo ""
 echo "📍 Service Status:"
-systemctl status dwnloader --no-pager
+systemctl status $SERVICE_NAME --no-pager || true
 echo ""
-echo "🌐 Access: http://YOUR_SERVER_IP:5000"
+echo "🌐 Access: http://$(hostname -I | awk '{print $1}'):5000"
 echo ""
 echo "📋 Useful Commands:"
-echo "  sudo systemctl status dwnloader   # Check status"
-echo "  sudo systemctl restart dwnloader  # Restart"
-echo "  sudo systemctl stop dwnloader     # Stop"
-echo "  sudo systemctl logs -f dwnloader  # View logs"
-echo "  sudo journalctl -u dwnloader -f   # Detailed logs"
+echo "  sudo systemctl status $SERVICE_NAME   # Check status"
+echo "  sudo systemctl restart $SERVICE_NAME  # Restart"
+echo "  sudo systemctl stop $SERVICE_NAME     # Stop"
+echo "  sudo journalctl -u $SERVICE_NAME -f  # View logs"
+echo "  sudo /usr/local/bin/update-ytdlp.sh  # Update yt-dlp manually"
+echo "  sudo tail -f /var/log/ytdlp-update.log # View update logs"
 echo ""
 echo "📁 Files located at: $INSTALL_DIR"
+echo "⏰ Daily yt-dlp updates: Enabled (runs at 6:25 AM)"
+echo ""
+if [ "$UPDATING" = true ]; then
+    echo "📝 Note: Old app.py backed up with timestamp"
+fi
 echo "=================================================="
